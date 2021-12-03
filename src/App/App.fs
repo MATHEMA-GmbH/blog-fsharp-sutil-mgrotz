@@ -9,26 +9,40 @@ let idGenerator = makeIdGenerator ()
 let ticksPerMinute = System.TimeSpan.TicksPerMinute
 
 
-type Model = { Counter : int }
-
+type Model = { LastTimerValue : int  }
+let getLastTimerValue m = m.LastTimerValue
 
 type Message =
-    | NoOp
+    | LastTimerValueChanged of int
 
-let init () : Model= ({ Counter = 0 })
+
+let init () : Model= ({ LastTimerValue = 0 })
 
 let update (msg : Message) (model : Model) : Model =
     match msg with
-    | NoOp -> model
+    | LastTimerValueChanged newValue -> { model with LastTimerValue = newValue }
+
+let planEditView (model: IStore<Model>) dispatch = 
+    Html.ul [
+      Html.li [
+          Html.label [Html.text "How many minutes should the next timer last?"]
+          Html.input [
+                          type' "number"
+                          Attr.value (model |> Store.map getLastTimerValue |> Store.distinct, LastTimerValueChanged >> dispatch)
+                          Attr.min 1
+                          Attr.max 15
+                          Attr.placeholder "How many minutes?"
+                      ]
+      ]
+  ]    
 
 let view() =
+    // create the application with The Elm Architecture
     let model, dispatch = () |> Store.makeElmishSimple init update ignore
 
     Html.div [
-        disposeOnUnmount [ model ]
-
         Html.div [
-            Html.text "It works."
+            planEditView model dispatch
         ]
     ]
 
