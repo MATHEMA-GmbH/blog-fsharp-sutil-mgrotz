@@ -10,6 +10,15 @@ let idGenerator = makeIdGenerator ()
 type Sound =
     | SingleShortBell
     | SingleLongBell
+let soundToString sound =
+    match sound with
+    | SingleShortBell -> "A single short bell chime"
+    | SingleLongBell -> "A single long bell chime"
+let soundToFile sound =
+    match sound with
+    | SingleShortBell -> "powerUp7.wav"
+    | SingleLongBell -> "FileLoad.wav"
+
 type TimerStep = {
     StepId : int
     Minutes : int
@@ -41,12 +50,29 @@ let update (msg : Message) (model : Model) : Model =
     | LastTimerValueChanged newValue -> { model with LastTimerValue = newValue }
     | AddSingleShortBell -> 
         let withNewStep = (createStep model.LastTimerValue SingleShortBell) :: model.TimerStepsReversed
-        Browser.Dom.console.info(Fable.Core.JS.JSON.stringify withNewStep)
-
         { model with TimerStepsReversed = withNewStep }
     | AddSingleLongBell -> 
         let withNewStep = (createStep model.LastTimerValue SingleLongBell) :: model.TimerStepsReversed
         { model with TimerStepsReversed = withNewStep }
+
+let meditationPlanView (model: IStore<Model>) dispatch =
+    fragment 
+        [
+            Html.h2 "Meditation session plan"
+            Bind.el (model |> Store.map getTimerSteps, fun steps ->
+            if List.isEmpty steps then
+                Html.h3 "No steps planned yet"
+            else
+            Html.ul 
+                [
+                Bind.each ((model |> Store.map getTimerSteps), (fun step ->
+                    Html.li [
+                        Html.span $"{soundToString step.Sound} after {step.Minutes} minute(s)"
+                    ] )
+                    )
+                ]
+            )
+        ]
 
 let planEditView (model: IStore<Model>) dispatch = 
     Html.ul [
@@ -83,6 +109,7 @@ let view() =
     Html.div [
         Html.div [
             planEditView model dispatch
+            meditationPlanView model dispatch
         ]
     ]
 
