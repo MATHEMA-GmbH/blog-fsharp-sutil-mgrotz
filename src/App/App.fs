@@ -27,33 +27,100 @@ type TimerStep = {
 let createStep minutes sound = 
     {StepId = idGenerator(); Minutes = minutes; Sound = sound;}
 
+type Ticks = Ticks of int64
+let formatElapsedTime (Ticks elapsedTime) : string =
+    System.TimeSpan(elapsedTime).ToString()
+
+type StepWithEndTime = {
+    Step: TimerStep
+    EndTime: Ticks
+}
+
+type PlayPlan = {
+    CurrentStep : StepWithEndTime
+    RemainingSteps : StepWithEndTime list
+}
+
+type PlayPlanCalculation = {
+    PreviousStepEnd : Ticks
+    CalculatedSteps : StepWithEndTime list
+}
+
 type Model = { 
     LastTimerValue : int  
     TimerStepsReversed : TimerStep list
+    Running : bool
+    StartTime : Ticks
+    ElapsedTimeSinceStart : Ticks
+    PlayPlan : PlayPlan option
     }
 let getLastTimerValue m = m.LastTimerValue
 let getTimerSteps m = m.TimerStepsReversed |> List.rev
+let getRunning m = m.Running
+let getElapsedTime m = m.ElapsedTimeSinceStart
+let getPlayPlan m = m.PlayPlan
 
 type Message =
     | LastTimerValueChanged of int
     | AddSingleShortBell
     | AddSingleLongBell
+    | StartSession
+    | TimerTick
 
 
-let init () : Model= ({ 
+let init () : Model * Cmd<Message> = ({ 
     LastTimerValue = 1 
     TimerStepsReversed = []
-    })
+    StartTime = Ticks 0L
+    ElapsedTimeSinceStart = Ticks 0L
+    PlayPlan = None
+    Running = false
+    }, Cmd.none)
 
-let update (msg : Message) (model : Model) : Model =
+let calculateNextTimerStep (timerStep : TimerStep) (state : PlayPlanCalculation) : PlayPlanCalculation =
+    // let minutesInTicks = (int64)timerStep.Minutes * System.TimeSpan.TicksPerMinute
+    let minutesInTicks = (int64)timerStep.Minutes * System.TimeSpan.TicksPerMinute / 10L // for DEBUG
+
+    // unwrap int64 value
+    let (Ticks previousStepEnd) = state.PreviousStepEnd
+
+    // calculate end and wrap again in Ticks type
+    let stepEndsAt =  previousStepEnd + minutesInTicks |> Ticks
+
+    // update the state we thread through each iteration
+    let withEndTime = {Step = timerStep; EndTime =  stepEndsAt}
+    { state with PreviousStepEnd = stepEndsAt; CalculatedSteps = withEndTime :: state.CalculatedSteps}
+
+let update (getNow : unit -> Ticks) (msg : Message) (model : Model) : (Model * Cmd<Message>) =
     match msg with
-    | LastTimerValueChanged newValue -> { model with LastTimerValue = newValue }
+    | LastTimerValueChanged newValue -> ({ model with LastTimerValue = newValue }, Cmd.none)
     | AddSingleShortBell -> 
         let withNewStep = (createStep model.LastTimerValue SingleShortBell) :: model.TimerStepsReversed
-        { model with TimerStepsReversed = withNewStep }
+        ({ model with TimerStepsReversed = withNewStep }, Cmd.none)
     | AddSingleLongBell -> 
         let withNewStep = (createStep model.LastTimerValue SingleLongBell) :: model.TimerStepsReversed
-        { model with TimerStepsReversed = withNewStep }
+        ({ model with TimerStepsReversed = withNewStep }, Cmd.none)
+    | StartSession ->
+        let now = getNow ()
+
+        let calculatedSteps = 
+                (List.foldBack  calculateNextTimerStep
+                                model.TimerStepsReversed 
+                                { PreviousStepEnd = now; CalculatedSteps = []})
+                    .CalculatedSteps // only take final result
+                    |> List.rev // put them in the right order   
+
+        // build initial PlayPlan
+        let playPlan = {
+            PlayPlan.CurrentStep = calculatedSteps |> List.head
+            RemainingSteps = calculatedSteps |> List.tail
+        }
+
+        // build Cmd to dispatch TimerTick message after approximately 1 second
+        let timerCmd = Cmd.OfAsync.perform (fun _ -> Async.Sleep 1_000) () (fun _ -> TimerTick)
+        ({model with Running = true; StartTime = now; PlayPlan = Some playPlan}, timerCmd)
+    | TimerTick -> 
+        (model, Cmd.none)
 
 let meditationPlanView (model: IStore<Model>) dispatch =
     fragment 
@@ -100,16 +167,36 @@ let planEditView (model: IStore<Model>) dispatch =
             Html.text "Add single long bell"
         ]
     ]   
-  ]    
+  ]   
+
+let startSessionButton (model: IStore<Model>) dispatch =
+            Bind.el ((model |> Store.map (fun m -> (m.Running, List.isEmpty m.TimerStepsReversed)) |> Store.distinct), 
+                    fun (running, noSteps) ->
+                        if running || noSteps then
+                            Html.text ""
+                        else 
+                            Html.button [
+                                type' "button"
+                                onClick (fun _ -> dispatch StartSession) []
+                                Html.text "Start session"
+                            ]
+                )
+
+let showElapsedTime (model: IStore<Model>) dispatch =
+    Bind.el ((model |> Store.map getElapsedTime), fun elapsedTime ->
+                Html.div (formatElapsedTime elapsedTime)
+            )
 
 let view() =
     // create the application with The Elm Architecture
-    let model, dispatch = () |> Store.makeElmishSimple init update ignore
+    let model, dispatch = () |> Store.makeElmish init (update (fun () -> Ticks System.DateTime.UtcNow.Ticks)) ignore
 
     Html.div [
         Html.div [
             planEditView model dispatch
             meditationPlanView model dispatch
+            startSessionButton model dispatch
+            showElapsedTime model dispatch
         ]
     ]
 
