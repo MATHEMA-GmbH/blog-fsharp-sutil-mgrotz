@@ -53,12 +53,14 @@ type Model = {
     StartTime : Ticks
     ElapsedTimeSinceStart : Ticks
     PlayPlan : PlayPlan option
+    PlayingSound : Sound option
     }
 let getLastTimerValue m = m.LastTimerValue
 let getTimerSteps m = m.TimerStepsReversed |> List.rev
 let getRunning m = m.Running
 let getElapsedTime m = m.ElapsedTimeSinceStart
 let getPlayPlan m = m.PlayPlan
+let getPlayingSound m = m.PlayingSound
 
 type Message =
     | LastTimerValueChanged of int
@@ -66,6 +68,7 @@ type Message =
     | AddSingleLongBell
     | StartSession
     | TimerTick
+    | SoundEnded
 
 
 let init () : Model * Cmd<Message> = ({ 
@@ -75,6 +78,7 @@ let init () : Model * Cmd<Message> = ({
     ElapsedTimeSinceStart = Ticks 0L
     PlayPlan = None
     Running = false
+    PlayingSound = None
     }, Cmd.none)
 
 let calculateNextTimerStep (timerStep : TimerStep) (state : PlayPlanCalculation) : PlayPlanCalculation =
@@ -120,7 +124,38 @@ let update (getNow : unit -> Ticks) (msg : Message) (model : Model) : (Model * C
         let timerCmd = Cmd.OfAsync.perform (fun _ -> Async.Sleep 1_000) () (fun _ -> TimerTick)
         ({model with Running = true; StartTime = now; PlayPlan = Some playPlan}, timerCmd)
     | TimerTick -> 
-        (model, Cmd.none)
+        model.PlayPlan
+        |> Option.map (fun playPlan -> // only do something if the PlayPlan exists
+            // unwrap all the data
+            let (Ticks now) = getNow ()
+            let (Ticks currentStepEndTime) = playPlan.CurrentStep.EndTime
+            let (Ticks startTime) = model.StartTime
+
+            // Case 1: Our final step has just ended
+            if List.isEmpty playPlan.RemainingSteps && currentStepEndTime < now then
+                ({model with Running = false; PlayingSound = Some playPlan.CurrentStep.Step.Sound}, Cmd.none)
+            else
+                // prepare the next tick
+                let tickCmd = Cmd.OfAsync.perform (fun _ -> Async.Sleep 1_000) () (fun _ -> TimerTick)
+
+                // update the elapsed time in the model here to avoid code duplication later
+                let elapsedTime = now - startTime
+                let modelWithNewElapsedTime = {model with ElapsedTimeSinceStart = Ticks elapsedTime}
+
+                if (currentStepEndTime < now) then
+                    // we have another step we need to move into our CurrentStep property
+                    let newPlayPlan = 
+                        {PlayPlan.CurrentStep = List.head playPlan.RemainingSteps; RemainingSteps = List.tail playPlan.RemainingSteps}
+                    
+                    ({modelWithNewElapsedTime with PlayPlan = Some newPlayPlan; PlayingSound = Some playPlan.CurrentStep.Step.Sound}, tickCmd)
+                else
+                    // just continue with another tick in 1 second
+                    (modelWithNewElapsedTime, tickCmd)
+        ) 
+        // fall back to "do nothing" if the PlayPlan does not exist
+        |> Option.defaultValue (model, Cmd.none)
+    | SoundEnded ->
+        ({model with PlayingSound = None}, Cmd.none)
 
 let meditationPlanView (model: IStore<Model>) dispatch =
     fragment 
@@ -187,16 +222,36 @@ let showElapsedTime (model: IStore<Model>) dispatch =
                 Html.div (formatElapsedTime elapsedTime)
             )
 
+let audioPlayback (model: IStore<Model>) dispatch =
+    Bind.el ((model |> Store.map getPlayingSound |> Store.distinct), fun sound -> 
+            match sound with
+            | None -> Html.text ""
+            | Some s -> Html.audio [    
+                on "ended" (fun _ -> dispatch SoundEnded) []
+                Attr.autoPlay true
+                Attr.src (soundToFile s) 
+                ]
+        )
+
+let ifNotRunning model viewFn =
+    Bind.el ((model |> Store.map getRunning), fun running ->
+        if running then
+            Html.text ""
+        else
+            viewFn)
+
 let view() =
     // create the application with The Elm Architecture
     let model, dispatch = () |> Store.makeElmish init (update (fun () -> Ticks System.DateTime.UtcNow.Ticks)) ignore
+    let ifNotRunning' = ifNotRunning model
 
     Html.div [
         Html.div [
-            planEditView model dispatch
+            ifNotRunning' (planEditView model dispatch)
             meditationPlanView model dispatch
             startSessionButton model dispatch
             showElapsedTime model dispatch
+            audioPlayback model dispatch
         ]
     ]
 
